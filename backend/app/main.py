@@ -1,5 +1,5 @@
 import os, re, secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
@@ -11,7 +11,14 @@ from .seed import seed
 
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
 app = FastAPI(title="Meetly API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", FRONTEND_BASE_URL], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_BASE_URL],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -52,6 +59,13 @@ def normalize(value: str):
     return f"{digits[:3]} {digits[3:6]} {digits[6:]}"
 
 
+def utc_naive(value: datetime) -> datetime:
+    """Store and compare all meeting times as UTC-naive SQLite datetimes."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def lookup(db, meeting_id):
     normalized = normalize(meeting_id) or meeting_id
     meeting = db.query(Meeting).options(joinedload(Meeting.host)).filter_by(meeting_id=normalized).first()
@@ -61,6 +75,10 @@ def lookup(db, meeting_id):
 
 @app.get("/api/health")
 def health(): return {"status": "ok"}
+
+
+@app.get("/health")
+def root_health(): return {"status": "ok"}
 
 @app.get("/api/meetings", response_model=list[MeetingOut])
 def meetings(db: Session = Depends(get_db)):
@@ -85,8 +103,10 @@ def instant(payload: InstantMeetingRequest, db: Session = Depends(get_db)):
 
 @app.post("/api/meetings/schedule", response_model=MeetingOut, status_code=status.HTTP_201_CREATED)
 def schedule(payload: ScheduleMeetingRequest, db: Session = Depends(get_db)):
-    if payload.scheduled_at < datetime.now(): raise HTTPException(422, "Choose a future date and time for this meeting.")
-    return serialize(create_meeting(db, payload.title, payload.description, payload.scheduled_at, payload.duration_minutes))
+    scheduled_at = utc_naive(payload.scheduled_at)
+    if scheduled_at < datetime.utcnow():
+        raise HTTPException(422, "Choose a future date and time for this meeting.")
+    return serialize(create_meeting(db, payload.title, payload.description, scheduled_at, payload.duration_minutes))
 
 @app.post("/api/meetings/join", response_model=MeetingOut)
 def join(payload: JoinMeetingRequest, db: Session = Depends(get_db)):
